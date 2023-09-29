@@ -1,0 +1,625 @@
+---
+title: "Modelo de Aprendizaje Automático para la Probabilidad de Impago"
+format: 
+  revealjs:
+    theme: default
+    slide-number: true
+    logo: extras/unsaac.png
+    css: extras/logo.css
+    incremental: true
+editor: visual
+author: Walter Quispe Vargas, PhD 
+institute: "DAME-UNSAAC"
+date: today
+lang: es
+engine: knitr
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{css}
+.center h2 {
+  text-align: center;
+}
+```
+
+## Contenido{.center}
+
+-   Riesgo de Crédito y Probabilidad de Impago (***Default***)
+-   Desarrollo de Modelos en Aprendizaje Automatizado (***Machine Learning Modeling***)
+    -   Pre-procesamiento de Datos
+    -   Selección de Variables y Modelo
+    -   *Extreme Gradient Boosting* (***XGBoost***)
+    -   Explicabilidad del Modelo.
+
+## Riesgo de Crédito{.center}
+
+::: r-stack
+![](extras/banco.png){.fragment .absolute top="100" left="100" width="250" height="300"}
+
+![](extras/presta.png){.fragment .absolute top="100" left="600" width="220" height="280"}
+
+![](extras/dinero.png){.fragment .absolute top="80" left="400" width="150" height="150"}
+
+![](extras/nopuede.png){.fragment .absolute top="300" left="400" width="150" height="150"}
+:::
+
+<br>  <br>  <br> <br> <br> <br> <br>
+
+- La posibilidad de una **pérdida**, resultante de que el prestatario no pague un préstamo o no cumpla con sus obligaciones contractuales.
+
+## Pérdida Creditícia Esperada (ECL){.center}
+
+- $$ECL = PD \times LGD \times EAD$$
+
+- ::: {.fragment .highlight-red .fade-in}
+$PD$: Probabilidad de Impago (*Probability of Default*)
+:::
+   - Modelos de Clasificación
+    
+- $LGD$: Pérdida dado el Impago (*Loss Given Default*)
+
+- $EAD$: Exposición al Impago (*Exposure At Default*)
+
+    - Modelos de Regresión (Tobit, Beta)
+
+## Probabilidad de Impago (PD){.center}
+
+- De acuerdo con IFRS 9 y CECL:
+
+    - "El impago ocurre cuando la institución bancaria considera que es poco probable que el deudor pague la totalidad de sus obligaciones crediticias al grupo bancario". (Bellini, 2019)
+
+::: r-stack
+![](extras/riesgo.png){.fragment .absolute top="400" left="250" width="500" height="300"}
+:::
+
+## **Machine Learning Modeling**{.center}
+
+::: r-stack
+![](extras/proceso.png){.fragment .fade-up .absolute top="100" left="0" width="1500" height="260"}
+:::
+
+<br>  <br>  <br> <br> <br>
+
+- ::: {.fragment .highlight-blue .grow .absolute top="380" left="400"}
+**CONTEXTO**
+:::
+
+- Observar el comportamiento de pagos de los clientes en un periodo de 12 meses, si durante este periodo, el atraso máximo a nivel clientes supera el umbral de 60 días, diremos que el cliente ha hecho **default**. 
+
+## Pre-procesamiento de Datos{.scrollable}
+
+::: {.panel-tabset}
+
+### Diccionario
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(kableExtra)
+dicc <- read_excel('DICCIONARIO.xlsx')
+dicc |>
+  kable() |> 
+  row_spec(seq(1,nrow(dicc),2), background="cyan") %>% 
+  kable_styling(full_width=FALSE)
+```
+
+### DataFrame
+
+```{r}
+base_df <- read.csv('BASE.csv', sep = ';')
+```
+`Número de Variables:`  `r ncol(base_df)` <br>
+`Número de Obsevaciones:` `r nrow(base_df)`
+
+```{r}
+base_df |>
+  select(-c(1,2)) |> 
+  head(30) |> 
+  kable()|> 
+  row_spec(seq(1,30,2), background="cyan") %>% 
+  kable_styling(full_width=FALSE)
+```
+
+
+### Skim()
+
+```{r}
+library(skimr) 
+base_df |>
+  select(-c(1,2)) |> 
+  skim()|> 
+  kable()|> 
+  row_spec(seq(1,46,2), background="cyan") %>% 
+  kable_styling(full_width=FALSE)
+```
+
+### Imbalance
+
+```{r}
+library(tidyverse)
+library(scales)
+library(themis)
+library(janitor)
+base_df1 <- base_df %>% 
+  select(-c(PERIODO,
+            ID,
+            MAX_DEUNOREV_12M,
+            MAX_DEU_JUD_24M,
+            N_ULT_DIFNOR_12M,
+            N_ULT_DIFNOR_24M,
+            PROM_DEUREV_24M,
+            PROM_DEUVNCD_12M,
+            )) %>% 
+   mutate(FLG_CLI_DEF60 = as.factor(FLG_CLI_DEF60))
+base_df1 %>% 
+  ggplot(aes(FLG_CLI_DEF60, fill = FLG_CLI_DEF60, color=FLG_CLI_DEF60))+
+  geom_bar(alpha = 0.5)+
+  scale_y_continuous(labels = comma)+
+  theme(legend.position="none")+
+  xlab("Variable Respuesta: DEFAULT (FLG_CLI_DEF60)")+
+  ylab("Número de Clientes")+
+  geom_text(stat = "count", aes(label=..count..), vjust=-0.2) 
+```
+
+### EDA
+`Máximo atrasos en los últimos 12 meses`
+
+```{r}
+base_df1 %>% 
+  ggplot(aes(MAX_ATR_I_12M, fill = FLG_CLI_DEF60, color=FLG_CLI_DEF60))+
+  geom_density(alpha = 0.5)+
+  scale_x_log10()+
+  xlab("Log Scale: MAX_ATR_I_12M")
+```
+
+`Número de meses con atrasos mayores iguales a 15 en los últimos 6 meses de comportamiento en los últimos 24 meses`
+
+```{r}
+base_df1 %>% 
+  ggplot(aes(NMES_ATR15_I_U6K_24M, fill = FLG_CLI_DEF60, color=FLG_CLI_DEF60))+
+  geom_density(alpha = 0.5)
+```
+
+`Número máximo de entidades acreedoras en los últimos 12 meses`
+
+```{r}
+base_df1 %>% 
+  ggplot(aes(MAX_ENT_12M, fill = FLG_CLI_DEF60, color=FLG_CLI_DEF60))+
+  geom_density(alpha = 0.5)
+```
+:::
+
+## Selección de Variables{.scrollable}
+
+::: {.panel-tabset}
+
+### Métodos
+
+- Reducción Secuencial: 
+
+    + Descartar Variables Altamente Correlacionadas (*collinear*)
+    + Descartar Variables con Cero Importancia (*catboost*)
+    + Descartar Variables con Cero Información Mutua (*entropy*)
+
+- Importancia de las Variables:
+
+    + Recursive Feature Elimination usando Logistic regression
+    + Logistic Regression L1 Penalty (Ridge)
+    + Logistic Regression L2 Penalty (Lasso)
+    + Random Forest
+    + Boosting Machines:
+        - AdaBoost
+        - LighGBM
+        - XGBoost
+        - CatBoost
+
+- Algorítmo: "**Boruta**" usando XGBoost
+
+### Python
+
+```{python}
+#| echo: true
+#| eval: false
+# system
+import os
+import warnings
+
+# general data manipulation
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+# data pre-processing
+from sklearn.compose import ColumnTransformer 
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# feature selection
+from scipy.stats import pearsonr, pointbiserialr
+
+from statsmodels import api as smc
+
+# spliting
+from sklearn.model_selection import train_test_split
+
+# feature selection
+from sklearn.feature_selection import chi2
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.feature_selection import RFE
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import SelectFromModel
+from boruta import BorutaPy
+
+
+# imbalance class
+from imblearn.over_sampling import SMOTE
+
+# machine learning
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+from sklearn.tree import DecisionTreeClassifier 
+from sklearn import tree
+
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
+
+from sklearn.linear_model import LogisticRegression
+
+# model evluation metrics
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve
+
+# visualization
+from matplotlib import pyplot as plt
+plt.style.use('seaborn-whitegrid')
+
+# external feature selector
+from external.feature_selector import FeatureSelector
+
+
+```
+
+### Resultados
+
+::: r-stack
+![](extras/select.png){.fragment .absolute top="190" left="290" width="500" height="500"}
+:::
+
+:::
+
+## Selección de Modelo{.scrollable}
+::: {.panel-tabset}
+
+### Challenge
+::: r-stack
+![](extras/model1.png){.fragment .fade-in .absolute top="300" left="20" width="1000" height="180"}
+
+![](extras/model2.png){.fragment .fade-in .absolute top="500" left="50" width="900" height="100"}
+
+![](extras/model3.png){.fragment .fade-in .absolute top="500" left="50" width="970" height="100"}
+:::
+
+### Comparación
+
+```{r comparison, echo=FALSE, fig.align='center', out.width="80%", message=FALSE,warning=FALSE, fig.width = 6, fig.height=4, fig.pos="H"}
+library(workflowsets)
+library(ggplot2)
+all <- readRDS(file = "all.rds")
+autoplot(all, metric = "roc_auc")+
+  ylab("ROC-AUC")+
+  xlab("")+
+  scale_x_discrete(limits = c("XGBoost","Random Forest","Logistic Regression"))+
+  scale_y_continuous(breaks = c(0.85, 0.86, 0.87), labels = c("0,81","0,82","0,83"))+
+  theme(legend.position="none")
+```
+
+:::
+
+
+## Extreme Gradient Boosting (XGBoost){.scrollable}
+::: {.panel-tabset}
+
+### Fundamentos
+
+- `XGBoost`: Algoritmo de *Machine Learning* para resolver problemas de Clasificación y Regresión.
+
+::: r-stack
+![](extras/xgb.png){.fragment .fade-up .absolute top="350" left="20" width="900" height="800"}
+:::
+
+### R 
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(lubridate)
+library(purrrlyr)
+library(glue)
+library(kableExtra)
+library(skimr) 
+library(tidymodels)
+library(themis)
+library(vip)
+library(tictoc)
+```
+
+Dataset Cleaned.
+
+```{r}
+#| echo: true
+base10 <- read.csv('base10.csv')
+base10 <- base10 %>% 
+  mutate(FLG_CLI_DEF60 = as.factor(FLG_CLI_DEF60))
+base10 %>% glimpse()
+```
+
+Initial Split
+
+```{r}
+#| echo: true
+set.seed(123)
+coll_split <- initial_split(base10, strata = FLG_CLI_DEF60)
+coll_train <- training(coll_split)
+coll_test <- testing(coll_split)
+```
+
+Transform for Imbalance Scenario
+
+```{r}
+#| echo: true
+coll_rec <- recipe(FLG_CLI_DEF60 ~ .,data = coll_train) %>%
+  step_downsample(FLG_CLI_DEF60, under_ratio = 3) %>% 
+  step_smote(FLG_CLI_DEF60)
+coll_prep <- prep(coll_rec)
+coll_rec %>%  prep() %>% bake(new_data=NULL) %>% count(FLG_CLI_DEF60)
+```
+
+
+Cross Validation
+
+```{r}
+#| echo: true
+set.seed(345)
+coll_folds <- vfold_cv(coll_train, strata = FLG_CLI_DEF60)
+```
+
+
+Define Machine Learning Model
+
+```{r}
+#| echo: true
+xgb_spec <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(), 
+  min_n = tune(), 
+  loss_reduction = tune(),                     
+  sample_size = tune(), 
+  mtry = tune(),         
+  learn_rate = tune(),                        
+) %>% 
+  set_engine("xgboost", nthread = 8) %>% 
+  set_mode("classification")
+```
+
+Define Workflow
+
+```{r}
+#| echo: true
+xgb_wf <- workflow() %>%
+  add_model(xgb_spec) %>% 
+  add_recipe(coll_rec)
+xgb_wf
+```
+
+Define Parameters
+
+```{r}
+#| echo: true
+xgb_params <- parameters(
+  trees(), learn_rate(),
+  tree_depth(), min_n(), 
+  loss_reduction(),
+  sample_size = sample_prop(), finalize(mtry(), coll_train)  
+)
+xgb_params <- xgb_params %>% update(trees = trees(c(100, 500)))
+```
+
+Define Grid for Initial Tune
+
+```{r}
+#| echo: true
+xgb_grid <- xgb_params %>% 
+  grid_max_entropy(size = 14)
+```
+
+Iterative Bayesian Optimization
+
+```{r}
+#| echo: true
+#| eval: false
+doParallel::registerDoParallel()
+tic()
+# Define grid search for initial tune
+set.seed(123)
+xgb_grid_search <- tune_grid(
+  xgb_wf,
+  resamples = coll_folds,
+  grid = xgb_grid
+)
+# Bayesian
+set.seed(234)
+xgb_tune <- tune_bayes(
+   xgb_wf,
+   resamples = coll_folds,
+   param_info = xgb_params,
+   initial = xgb_grid_search,
+   iter = 30,
+   metrics = metric_set(roc_auc, sensitivity, specificity, precision,recall,f_meas),
+   control = control_bayes(no_improve = 30, verbose = TRUE)
+)
+toc()
+```
+
+Results
+
+```{r}
+xgb_tune <- readRDS(file = "xgb_tune.Rdata")
+autoplot(xgb_tune)
+```
+
+Collect Metrics
+
+```{r}
+collect_metrics(xgb_tune)
+```
+AUC
+
+```{r}
+xgb_tune_auc <- xgb_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc")
+xgb_tune_auc
+```
+
+Best 
+
+```{r}
+show_best(xgb_tune, "roc_auc")
+```
+Best AUC
+
+```{r}
+best_auc <- select_best(xgb_tune, "roc_auc")
+best_auc
+```
+
+Final Model
+
+```{r}
+final_xgb <- finalize_workflow(
+  xgb_wf,
+  best_auc
+)
+final_xgb
+```
+
+Importance
+
+```{r vip, echo=FALSE, fig.align='center', out.width="100%", message=FALSE,warning=FALSE, fig.width = 5, fig.height=4, fig.pos="H"}
+library(workflowsets)
+vi_score <- final_xgb %>%
+  fit(data = coll_train) %>%
+  pull_workflow_fit() |> 
+  vi()
+
+vi_score %>% ggplot(aes(x=reorder(Variable,Importance), y=Importance, fill = Importance))+
+       geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Importance")+
+      xlab("")+
+      guides(fill=F)+
+      scale_fill_gradient(low="#b1e7b1", high="ForestGreen")
+```
+
+Last Fit Testing
+
+```{r}
+final_res <- last_fit(final_xgb, coll_split,
+                      metrics = metric_set(roc_auc, sensitivity, specificity, precision,recall,f_meas))
+
+collect_metrics(final_res)
+```
+Confusion Matrix
+
+```{r confu, echo=FALSE, fig.align='center', out.width="80%", message=FALSE,warning=FALSE, fig.width = 3, fig.height=3, fig.pos="H"}
+library(caret)
+x <- final_res %>%
+  collect_predictions()
+table <- data.frame(confusionMatrix(x$.pred_class, x$FLG_CLI_DEF60)$table)
+plotTable <- table %>%
+  mutate(goodbad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  mutate(prop = Freq/sum(Freq))
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = goodbad, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, alpha = 1) +
+  scale_fill_manual(values = c(good = "green", bad = "red")) +
+  xlim(rev(levels(table$Reference)))+
+  xlab("Truth")+
+  theme(legend.position = 'none')
+```
+
+ROC-AUC Testing
+
+```{r, echo=FALSE, fig.align='center', out.width="80%", message=FALSE,warning=FALSE, fig.width = 3, fig.height=3, fig.pos="H"}
+x <- collect_metrics(final_res)[6,3]
+rocauc <- paste("ROC-AUC = ",round(x,3))
+final_res %>%
+  collect_predictions() %>%
+  roc_curve(FLG_CLI_DEF60, .pred_0) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(size = 1, color = "magenta") +
+  geom_abline(
+    lty = 2, alpha = 0.5,
+    color = "gray50",
+    size = 1
+  )+  
+  xlab("False Positive Rate")+
+  ylab("True Positive Rate")+
+  ggtitle(paste0(rocauc))
+```
+
+:::
+
+## Explicabilidad del Modelo {.center}
+
+::: {.panel-tabset}
+
+### SHAP
+
+- La explicabilidad del modelo se refiere al concepto de poder comprender el modelo de aprendizaje automático.
+
+- Las explicaciones aditivas de Shapley son un enfoque independiente del modelo, donde las contribuciones promedio de las características se calculan bajo diferentes combinaciones o "coaliciones" de ordenamiento de características.
+
+```{r}
+library(SHAPforxgboost)
+
+xgb_fit <- extract_fit_parsnip(final_res)
+
+game_shap <-
+  shap.prep(
+    xgb_model = extract_fit_engine(xgb_fit),
+    X_train = bake(coll_prep,
+      has_role("predictor"),
+      new_data = NULL,
+      composition = "matrix"
+    )
+  )
+```
+
+### En General
+
+```{r}
+shap.plot.summary(game_shap)
+```
+
+### Parcial
+
+```{r}
+shap.plot.dependence(
+  game_shap,
+  x = "MAX_ATR_I_12M",
+  color_feature = "NMES_ATR15_I_U6K_24M",
+  size0 = 1.2,
+  smooth = FALSE, add_hist = TRUE
+)
+```
+:::
+
+## Preguntas{.center}
